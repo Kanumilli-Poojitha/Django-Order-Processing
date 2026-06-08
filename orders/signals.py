@@ -1,68 +1,70 @@
 """
-Stage A — Signal-based implementation.
+Stage A signal receiver — @receiver decorator removed in Stage B (REQ-019).
 
-This module defines the post_save receiver that keeps UserStats in sync
-whenever a new Order is created.
+HISTORY
+-------
+Stage A attached this function to the post_save signal via the
+@receiver(post_save, sender=Order) decorator and registered it by
+importing this module inside OrdersConfig.ready().
 
-HOW IT IS CONNECTED
--------------------
-orders/apps.py imports this module inside OrdersConfig.ready().  That
-import causes the @receiver decorator to be evaluated, which calls
-post_save.connect(update_user_stats_on_order_save, sender=Order).
-Django then calls the function automatically after every Order.save()
-that results in a database INSERT (created=True).
+Stage B removes the decorator (REQ-019) and removes the import from
+apps.py (REQ-018) so the function is never connected automatically at
+application startup.
 
-KNOWN LIMITATIONS (demonstrated by the Stage A tests)
-------------------------------------------------------
-1. Bulk bypass
-   QuerySet.update() and bulk_create() operate at the SQL level and never
-   call .save() on individual instances.  The post_save signal therefore
-   never fires, leaving UserStats silently out of sync.
+WHY THIS FILE IS KEPT
+---------------------
+1. Historical documentation: preserves the exact Stage A implementation
+   as a reference for the architectural comparison.
 
-2. No transactional atomicity
-   The signal fires after the Order INSERT has already been committed.
-   If update_user_stats_on_order_save raises an exception, the Order row
-   persists in the database but UserStats is not updated — the two tables
-   are now inconsistent.
+2. Test support: orders/tests/test_signals.py imports
+   update_user_stats_on_order_save by name so it can call
+   post_save.connect() / post_save.disconnect() within individual test
+   cases, proving Stage A behaviour without affecting the Stage B runtime.
 
-3. Test isolation cost
-   Because signal receivers are registered globally, tests that rely on
-   signal behaviour must explicitly disconnect the receiver in tearDown()
-   to prevent state from leaking into unrelated test cases.
+   Calling post_save.disconnect() for a receiver that is not connected
+   is a safe no-op in Django, so the tearDown() calls in test_signals.py
+   continue to work correctly without modification.
 
-These limitations are addressed in Stage B by moving the business logic
-into a service function wrapped in transaction.atomic().
+STAGE B RUNTIME STATE
+---------------------
+- The function exists in memory but is never connected to any signal.
+- Order.objects.create() does NOT trigger this function.
+- UserStats is only updated when orders/services.create_order() is called.
 """
-from django.db.models.signals import post_save
-from django.dispatch import receiver
-
 from .models import Order, UserStats
 
 
-@receiver(post_save, sender=Order)
 def update_user_stats_on_order_save(sender, instance, created, **kwargs):
     """
+    [STAGE A — DISCONNECTED IN STAGE B]
+
     Update UserStats whenever a new Order row is inserted.
 
-    The ``created`` guard ensures this function is a no-op when an
-    existing Order is updated (e.g. status changed to 'shipped'), so the
-    total_spent and order_count are not double-counted.
+    This function is no longer connected to the post_save signal.
+    It is preserved so that test_signals.py can import it by name for
+    explicit connect/disconnect calls within test setUp/tearDown without
+    raising an ImportError.
+
+    Original Stage A behaviour (when decorated and connected):
+      - Fired only when created=True (new INSERT, not an UPDATE).
+      - Called UserStats.objects.get_or_create(user=instance.user).
+      - Incremented stats.order_count by 1.
+      - Added instance.total to stats.total_spent.
+      - Called stats.save().
+
+    This logic now lives in orders/services.create_order() wrapped in
+    transaction.atomic(), which guarantees consistency and is not bypassed
+    by bulk database operations.
 
     Args:
-        sender:   The model class that sent the signal (always Order here).
-        instance: The Order instance that was just saved to the database.
-        created:  True when the database operation was an INSERT (new row);
-                  False when it was an UPDATE (existing row).
-        **kwargs: Additional keyword arguments supplied by Django's signal
-                  dispatcher (e.g. ``raw``, ``using``, ``update_fields``).
+        sender:   The model class that sent the signal (Order).
+        instance: The Order instance that was just saved.
+        created:  True for INSERT; False for UPDATE.
+        **kwargs: Additional keyword arguments from the signal dispatcher.
     """
     if created:
         user = instance.user
-
-        # get_or_create handles the case where the user has never placed an
-        # order before — it creates a zeroed-out UserStats row on demand.
         stats, _ = UserStats.objects.get_or_create(user=user)
-
         stats.order_count += 1
         stats.total_spent += instance.total
         stats.save()
