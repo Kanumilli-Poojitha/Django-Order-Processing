@@ -1,46 +1,3 @@
-"""
-Stage A Tests — Signal-based behaviour.
-
-PURPOSE
--------
-This module is the complete test suite for the Stage A signal-based
-implementation.  It demonstrates and proves:
-
-  1. Creating a single Order via Order.objects.create() triggers the
-     post_save receiver and creates a UserStats row with correct values.
-
-  2. Creating multiple Orders correctly accumulates order_count and
-     total_spent in UserStats.
-
-  3. Calling .save() on an existing Order (created=False) does NOT
-     re-trigger the stats update, because the receiver guards with
-     ``if created``.
-
-  4. QuerySet.update() issues a raw SQL UPDATE statement, never calls
-     .save() on any model instance, and therefore never fires post_save.
-     UserStats remains unchanged — the "bulk operation bypass" trap.
-
-  5. Test isolation: every TestCase class that interacts with the signal
-     explicitly connects the receiver in setUp() and disconnects it in
-     tearDown(), preventing signal state from leaking between test cases.
-
-DESIGN NOTES
-------------
-apps.py registers the signal by importing orders.signals in ready().
-That registration happens once at application startup and persists for
-the lifetime of the process.
-
-Django's TestCase wraps each test method in a transaction that is rolled
-back after the test, giving a clean database slate.  However, signal
-*connections* are NOT rolled back by transactions — they are in-memory
-state.  A test that calls post_save.disconnect() in tearDown() genuinely
-removes the connection until the next setUp() call reinstates it.
-
-By explicitly calling post_save.connect() in setUp() we also make these
-tests self-contained: they work correctly whether apps.py registered the
-signal at startup or not, which means the entire test file can be run
-in isolation with `python manage.py test orders.tests.test_signals`.
-"""
 from decimal import Decimal
 
 from django.contrib.auth.models import User
@@ -52,25 +9,8 @@ from orders.signals import update_user_stats_on_order_save
 
 
 class OrderSignalTests(TestCase):
-    """
-    Core signal behaviour tests.
-
-    setUp()    — connects the Stage A receiver so every test in this
-                 class starts with the signal active.
-    tearDown() — disconnects the receiver after every test method.
-                 This is the required isolation pattern (REQ-015):
-                 post_save.disconnect(receiver=..., sender=Order).
-    """
 
     def setUp(self):
-        """
-        Connect the post_save receiver and create a fresh test user.
-
-        The explicit connect() call makes this class self-contained.
-        Django's signal system is idempotent for the same receiver/sender
-        pair: connecting a receiver that is already connected does not
-        register it twice.
-        """
         post_save.connect(
             receiver=update_user_stats_on_order_save,
             sender=Order,
@@ -82,19 +22,6 @@ class OrderSignalTests(TestCase):
         )
 
     def tearDown(self):
-        """
-        Disconnect the post_save receiver after every test method.
-
-        This is the critical test-isolation step.  Without this call,
-        the receiver would remain connected for every subsequent test in
-        the entire test suite — including Stage B tests that assert that
-        Order.objects.create() does NOT update UserStats.  Leaving the
-        receiver connected would cause those Stage B tests to fail with
-        false positives.
-
-        The call matches the exact signature required by the spec:
-            post_save.disconnect(receiver=<function>, sender=Order)
-        """
         post_save.disconnect(
             receiver=update_user_stats_on_order_save,
             sender=Order,
@@ -105,13 +32,6 @@ class OrderSignalTests(TestCase):
     # ------------------------------------------------------------------
 
     def test_signal_creates_userstats_on_first_order(self):
-        """
-        Creating a single Order via Order.objects.create() must trigger
-        the post_save receiver, which must:
-          - create a UserStats row for the user (get_or_create path)
-          - set order_count to 1
-          - set total_spent to the order's total
-        """
         order = Order.objects.create(
             user=self.user,
             total=Decimal('75.00'),
@@ -173,14 +93,6 @@ class OrderSignalTests(TestCase):
     # ------------------------------------------------------------------
 
     def test_signal_only_fires_on_creation_not_update(self):
-        """
-        Updating a field on an existing Order and calling .save() triggers
-        post_save with created=False.  The receiver's ``if created`` guard
-        must prevent any change to UserStats.
-
-        This proves that repeated .save() calls on the same Order do not
-        inflate order_count or total_spent.
-        """
         order = Order.objects.create(
             user=self.user,
             total=Decimal('100.00'),
@@ -218,38 +130,6 @@ class OrderSignalTests(TestCase):
     # ------------------------------------------------------------------
 
     def test_bulk_update_bypasses_signal(self):
-        """
-        Prove that QuerySet.update() does NOT trigger the post_save signal.
-
-        This test demonstrates the critical "bulk operation bypass" trap
-        described in the project specification (REQ-014).
-
-        Procedure (required by spec):
-
-        Step 1 — Create two Orders for self.user via Order.objects.create().
-                 Assert UserStats reflects order_count=2 and the correct
-                 total_spent.
-
-        Step 2 — Create a third Order for self.user.
-                 Assert UserStats updates to order_count=3.
-
-        Step 3 — Create several Orders for a different user (other_user)
-                 using Order.objects.bulk_create().
-                 bulk_create() does NOT fire post_save, so other_user gets
-                 no UserStats row and self.user's stats are unaffected.
-
-        Step 4 — Reassign those bulk-created Orders to self.user using
-                 QuerySet.update().
-                 QuerySet.update() issues a single raw SQL UPDATE statement.
-                 Django does NOT instantiate model objects.
-                 Django does NOT call .save() on any instance.
-                 Django does NOT fire the pre_save or post_save signals.
-
-        Step 5 — Fetch UserStats for self.user again.
-                 Assert order_count is still 3 (not 6).
-                 Assert total_spent is still 55.00 (not 70.00).
-                 This proves the signal logic did not run.
-        """
         # ------------------------------------------------------------------
         # Step 1: two orders via create(), verify initial stats
         # ------------------------------------------------------------------
@@ -379,11 +259,6 @@ class OrderSignalTests(TestCase):
     # ------------------------------------------------------------------
 
     def test_signal_updates_existing_userstats_row(self):
-        """
-        If a UserStats row already exists for the user (created by a
-        previous order), the receiver must update it rather than creating
-        a duplicate, and the totals must accumulate correctly.
-        """
         # First order — creates the UserStats row
         Order.objects.create(user=self.user, total=Decimal('40.00'))
         stats = UserStats.objects.get(user=self.user)
@@ -414,19 +289,8 @@ class OrderSignalTests(TestCase):
 
 
 class SignalIsolationDemonstrationTests(TestCase):
-    """
-    A second independent TestCase class.
-
-    Proves that the setUp/tearDown connect/disconnect pattern keeps signal
-    state correctly isolated between different test classes.  At the moment
-    setUp() runs here, the receiver may or may not be connected (depending
-    on test execution order).  Calling connect() unconditionally in setUp()
-    and disconnect() in tearDown() guarantees a predictable state for every
-    single test method regardless of what other test classes have done.
-    """
 
     def setUp(self):
-        """Connect the receiver and create a test user."""
         post_save.connect(
             receiver=update_user_stats_on_order_save,
             sender=Order,
@@ -445,12 +309,6 @@ class SignalIsolationDemonstrationTests(TestCase):
         )
 
     def test_signal_works_in_second_test_class(self):
-        """
-        The signal must function correctly inside this class even though
-        OrderSignalTests.tearDown() disconnected it for every test in that
-        class.  The connect() call in this setUp() re-establishes the
-        connection, proving that isolation is symmetric and complete.
-        """
         Order.objects.create(user=self.user, total=Decimal('99.99'))
 
         stats = UserStats.objects.get(user=self.user)
@@ -467,10 +325,6 @@ class SignalIsolationDemonstrationTests(TestCase):
         )
 
     def test_multiple_orders_in_second_test_class(self):
-        """
-        Accumulation must work correctly in this class too, confirming
-        the receiver is properly active after each setUp() connect() call.
-        """
         Order.objects.create(user=self.user, total=Decimal('10.00'))
         Order.objects.create(user=self.user, total=Decimal('20.00'))
         Order.objects.create(user=self.user, total=Decimal('30.00'))
