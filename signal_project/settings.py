@@ -1,9 +1,3 @@
-"""
-Django settings for signal_project.
-
-All sensitive values are read from environment variables so the same
-Docker image can run in development, CI, and production without changes.
-"""
 import os
 from pathlib import Path
 

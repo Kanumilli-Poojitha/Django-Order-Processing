@@ -1,4 +1,3 @@
-"""Root URL configuration for signal_project."""
 from django.contrib import admin
 from django.urls import path, include
 

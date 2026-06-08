@@ -1,4 +1,3 @@
-"""WSGI config for signal_project."""
 import os
 from django.core.wsgi import get_wsgi_application
 

@@ -1,9 +1,3 @@
-"""
-Initial migration.
-
-Creates the orders_order and orders_userstats tables with field
-definitions that exactly match the model specifications.
-"""
 import django.db.models.deletion
 from django.conf import settings
 from django.db import migrations, models
