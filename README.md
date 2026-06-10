@@ -661,3 +661,9 @@ docker-compose exec db psql -U postgres_user -d signal_project_db \
 curl http://localhost:8000/health/
 # Expected: {"status": "ok"}
 ```
+
+Demo video:
+https://drive.google.com/file/d/1S9Yn3uhJ67hJqXqjsqhhH2gpSb53cVmJ/view?usp=sharing
+
+Live video:
+https://drive.google.com/file/d/1NPJ3eYt8oao8-t_RAMmet8SxEuIPFIh8/view?usp=sharing
